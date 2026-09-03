@@ -1,146 +1,210 @@
-import { eq } from 'drizzle-orm';
+import { asc, eq, inArray } from 'drizzle-orm';
 
 import { db } from './client';
-import { visits, type Visit } from './schema';
+import {
+  applyRemoteMutation,
+  hasMutation,
+  markRejected,
+  rebuildProjection,
+  recordServerSeq,
+  toRecord,
+} from './mutations';
+import {
+  mutations,
+  syncState,
+  type EntityName,
+  type MutationKind,
+  type MutationPatch,
+} from './schema';
 
 /**
  * Wire format — must stay identical to server/src/routes/sync.ts.
- * Timestamps are epoch-millisecond integers, not Date and not ISO strings:
- * both sides have to compare the exact same integer.
+ *
+ * As of phase 3 we ship OPERATIONS, not rows. Timestamps are epoch-millisecond
+ * integers so both sides handle the identical number.
  */
-export type WireVisit = {
-  id: string;
-  patientName: string;
-  notes: string;
-  createdAt: number;
-  updatedAt: number;
+export type WireMutation = {
+  opId: string;
+  entity: EntityName;
+  entityId: string;
+  kind: MutationKind;
+  patch: MutationPatch;
+  timestamp: number;
+  deviceId: string | null;
 };
+
+export type RejectionReason = 'stale' | 'invalid_transition';
+
+/** Per-operation verdict. A rejection is a verdict, not a failed request. */
+export type OpResult =
+  | { opId: string; outcome: 'accepted'; serverSeq: number }
+  | { opId: string; outcome: 'duplicate' }
+  | {
+      opId: string;
+      outcome: 'rejected';
+      reason: RejectionReason;
+      /** Server's current value, plus which device set it. */
+      current: { status?: string; byDevice?: string | null } | null;
+    };
+
+/** What the server adds when it accepts an operation. */
+export type WireServerMutation = WireMutation & { serverSeq: number };
 
 export const API_BASE_URL =
   process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:8787';
 
+const CURSOR_KEY = 'lastServerSeq';
+
 export type SyncResult = {
   pushed: number;
-  discardedByServer: number;
+  accepted: number;
+  /** Operations the server had already seen — duplicates, not errors. */
+  alreadyOnServer: number;
+  /** Operations the server refused. Flagged locally, excluded from replay. */
+  rejected: number;
   pulled: number;
-  insertedLocally: number;
-  /** Local rows replaced by the server's version. This is the data loss. */
-  overwrittenLocally: number;
-  keptLocal: number;
+  appliedLocally: number;
+  /** Pulled operations this device had already recorded (usually its own). */
+  skippedAsDuplicate: number;
   at: Date;
 };
 
-function toWire(visit: Visit): WireVisit {
-  return {
-    id: visit.id,
-    patientName: visit.patientName,
-    notes: visit.notes,
-    createdAt: visit.createdAt.getTime(),
-    updatedAt: visit.updatedAt.getTime(),
-  };
+async function readCursor(): Promise<number> {
+  const row = await db
+    .select()
+    .from(syncState)
+    .where(eq(syncState.key, CURSOR_KEY))
+    .limit(1);
+  return row.length > 0 ? Number(row[0].value) : 0;
 }
 
-/**
- * The last-write-wins rule, client side. This MUST agree with the server's
- * `setWhere` clause exactly — if the two sides ever disagreed about who won,
- * the devices would diverge permanently and never converge again.
- *
- * Newer `updatedAt` wins outright. On an exact millisecond tie, content
- * decides: the two fields are joined with a low separator byte and compared
- * byte-wise, matching the server's `collate "C"` comparison. Arbitrary, but
- * deterministic and identical on both sides.
- *
- * Note what is absent: any notion of individual fields. The winner's entire
- * row replaces the loser's entire row.
- */
-export function incomingWins(incoming: WireVisit, existing: WireVisit): boolean {
-  if (incoming.updatedAt !== existing.updatedAt) {
-    return incoming.updatedAt > existing.updatedAt;
-  }
-  const a = `${incoming.patientName}${incoming.notes}`;
-  const b = `${existing.patientName}${existing.notes}`;
-  return a > b;
+async function writeCursor(value: number): Promise<void> {
+  await db
+    .insert(syncState)
+    .values({ key: CURSOR_KEY, value: String(value) })
+    .onConflictDoUpdate({
+      target: syncState.key,
+      set: { value: String(value) },
+    });
 }
 
 export async function syncNow(): Promise<SyncResult> {
-  const local = await db.select().from(visits);
+  // ---- PUSH: unsynced operations, oldest first ----------------------------
+  // Order matters: an insert must reach the server before the update that
+  // depends on it, and `seq` is what guarantees that within this device.
+  const pending = await db
+    .select()
+    .from(mutations)
+    .where(eq(mutations.synced, false))
+    .orderBy(asc(mutations.seq));
 
-  const pushResponse = await fetch(`${API_BASE_URL}/sync/push`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ visits: local.map(toWire) }),
-  });
-  if (!pushResponse.ok) {
-    throw new Error(`push failed: HTTP ${pushResponse.status}`);
+  let alreadyOnServer = 0;
+  let accepted = 0;
+  let rejected = 0;
+
+  if (pending.length > 0) {
+    const response = await fetch(`${API_BASE_URL}/sync/push`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mutations: pending.map(toRecord) }),
+    });
+    if (!response.ok) {
+      throw new Error(`push failed: HTTP ${response.status}`);
+    }
+    const { results } = (await response.json()) as { results: OpResult[] };
+
+    // Each operation gets its own verdict. A rejection does not fail the
+    // batch, and it does not throw — the other operations still committed.
+    for (const outcome of results) {
+      if (outcome.outcome === 'rejected') {
+        await markRejected(
+          outcome.opId,
+          outcome.reason,
+          outcome.current?.byDevice ?? null,
+        );
+        rejected += 1;
+        continue;
+      }
+      if (outcome.outcome === 'accepted') {
+        await recordServerSeq(outcome.opId, outcome.serverSeq);
+        accepted += 1;
+        continue;
+      }
+      alreadyOnServer += 1;
+    }
+
+    // Anything the server answered about is no longer pending. A failed push
+    // throws above instead, leaving entries queued for the next attempt —
+    // safe because the server dedupes on opId.
+    await db
+      .update(mutations)
+      .set({ synced: true })
+      .where(
+        inArray(
+          mutations.seq,
+          pending.map((entry) => entry.seq),
+        ),
+      );
   }
-  const pushed = (await pushResponse.json()) as {
-    received: number;
-    applied: number;
-    discarded: number;
-  };
 
-  const pullResponse = await fetch(`${API_BASE_URL}/sync/pull`);
+  // ---- PULL: operations after our cursor ----------------------------------
+  const since = await readCursor();
+  const pullResponse = await fetch(`${API_BASE_URL}/sync/pull?since=${since}`);
   if (!pullResponse.ok) {
     throw new Error(`pull failed: HTTP ${pullResponse.status}`);
   }
-  const { visits: remote } = (await pullResponse.json()) as {
-    visits: WireVisit[];
+  const { mutations: incoming } = (await pullResponse.json()) as {
+    mutations: WireServerMutation[];
   };
 
-  const localById = new Map(local.map((visit) => [visit.id, toWire(visit)]));
+  let appliedLocally = 0;
+  let skippedAsDuplicate = 0;
+  let highestSeq = since;
 
-  let insertedLocally = 0;
-  let overwrittenLocally = 0;
-  let keptLocal = 0;
+  for (const entry of incoming) {
+    highestSeq = Math.max(highestSeq, entry.serverSeq);
 
-  for (const incoming of remote) {
-    const existing = localById.get(incoming.id);
-
-    if (!existing) {
-      await db.insert(visits).values({
-        id: incoming.id,
-        patientName: incoming.patientName,
-        notes: incoming.notes,
-        createdAt: new Date(incoming.createdAt),
-        updatedAt: new Date(incoming.updatedAt),
-      });
-      insertedLocally += 1;
+    // Our own operations come back to us on pull. We must not apply the effect
+    // twice — but we DO need the serverSeq, because that is this device's only
+    // way to learn where its own operations sit in the shared order.
+    if (await hasMutation(entry.opId)) {
+      await recordServerSeq(entry.opId, entry.serverSeq);
+      skippedAsDuplicate += 1;
       continue;
     }
 
-    if (incomingWins(incoming, existing)) {
-      // The local version is destroyed here. No error, no prompt, and no
-      // record of what it used to say — overwriting is what last-write-wins
-      // calls success. The console line below exists only so the moment of
-      // loss is observable at all.
-      console.log(
-        `[sync] overwriting local ${incoming.id.slice(0, 8)}: ` +
-          `"${existing.patientName}" / "${existing.notes}" -> ` +
-          `"${incoming.patientName}" / "${incoming.notes}"`,
-      );
-      await db
-        .update(visits)
-        .set({
-          patientName: incoming.patientName,
-          notes: incoming.notes,
-          createdAt: new Date(incoming.createdAt),
-          updatedAt: new Date(incoming.updatedAt),
-        })
-        .where(eq(visits.id, incoming.id));
-      overwrittenLocally += 1;
-      continue;
-    }
+    await applyRemoteMutation(
+      {
+        opId: entry.opId,
+        entity: entry.entity,
+        entityId: entry.entityId,
+        kind: entry.kind,
+        patch: entry.patch,
+        timestamp: entry.timestamp,
+        deviceId: entry.deviceId,
+      },
+      entry.serverSeq,
+    );
+    appliedLocally += 1;
+  }
 
-    keptLocal += 1;
+  // Replay everything in the shared order. Operations were applied above as
+  // they arrived, which is precisely the ordering that cannot be trusted —
+  // this is what makes every device land on the same state.
+  await rebuildProjection();
+
+  if (highestSeq > since) {
+    await writeCursor(highestSeq);
   }
 
   return {
-    pushed: pushed.received,
-    discardedByServer: pushed.discarded,
-    pulled: remote.length,
-    insertedLocally,
-    overwrittenLocally,
-    keptLocal,
+    pushed: pending.length,
+    accepted,
+    rejected,
+    alreadyOnServer,
+    pulled: incoming.length,
+    appliedLocally,
+    skippedAsDuplicate,
     at: new Date(),
   };
 }

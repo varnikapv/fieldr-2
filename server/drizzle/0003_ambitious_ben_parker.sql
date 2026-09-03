@@ -1,0 +1,1 @@
+ALTER TABLE "mutations" ADD COLUMN "device_id" text;

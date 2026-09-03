@@ -8,6 +8,27 @@
       "when": 1788412299556,
       "tag": "0000_groovy_hardball",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788416712908,
+      "tag": "0001_boring_morlocks",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788425604942,
+      "tag": "0002_handy_champions",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1788428233155,
+      "tag": "0003_ambitious_ben_parker",
+      "breakpoints": true
     }
   ]
 }

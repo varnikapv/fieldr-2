@@ -1,0 +1,1 @@
+ALTER TABLE `mutations` ADD `server_seq` integer;
