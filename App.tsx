@@ -7,6 +7,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { db } from './db/client';
 import migrations from './drizzle/migrations';
+import { useAutoSync } from './hooks/useAutoSync';
 import { FollowUpsScreen } from './screens/FollowUpsScreen';
 import { SyncInspectorScreen } from './screens/SyncInspectorScreen';
 import { styles } from './screens/styles';
@@ -36,6 +37,13 @@ export default function App() {
       </View>
     );
   }
+
+  // Mounted only once migrations have succeeded — see the note in the hook.
+  return <Main />;
+}
+
+function Main() {
+  useAutoSync();
 
   return (
     <SafeAreaProvider>
