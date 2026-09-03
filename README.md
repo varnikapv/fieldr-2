@@ -380,3 +380,15 @@ node:sqlite behind drizzle's sqlite-proxy), so the sync logic under test was
 the real shipped code rather than a reimplementation. That is what surfaced
 the bug — the earlier replica harnesses had reimplemented the stamping and
 therefore could not reproduce it.
+
+### Confirmed on device after the attribution fix
+Re-ran the two-device follow-up conflict on real hardware once the nullish-
+fallback fix was in. Both devices offline, both ticked the same item done. The
+second device was refused, and its sync inspector rendered the flagged card
+naming the *first device's actual id* — not "unknown", and not its own id,
+which is exactly what the `??` bug would have produced.
+
+Worth recording as a testing lesson rather than a code one: the Node harness
+proved the data was right (`rejectionReason`, `rejectionByDevice`), but it
+could not prove the card rendered. Those are two different claims, and only the
+device could settle the second.
