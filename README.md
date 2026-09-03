@@ -349,3 +349,34 @@ stores authorship per operation (both of device A's operations came back
 attributed to it on pull). Nothing about acceptance or rejection changed: the
 same operation is refused for the same reason as in phase 4, only the
 explanation got better.
+
+### `??` made every device claim authorship of history
+Caught while verifying phase 5 step 1 by running the real client modules as two
+devices against the server. Device A had authored two operations, but its log
+reported forty as its own.
+
+The stamping logic was:
+
+```ts
+const deviceId = record.deviceId ?? (await getDeviceId());
+```
+
+`??` cannot distinguish "this operation has no author field, because I just
+created it and it needs stamping" from "this operation's author is explicitly
+null, because it was recorded before device identity existed". Operations
+replayed from the server with `deviceId: null` — everything from phases 1
+through 4 — fell through to the fallback and were stamped as authored by
+whichever device happened to replay them.
+
+Nothing visibly broke, which is what makes it worth recording. The failure
+would have surfaced much later as a rejection card naming the wrong device,
+and it would have been very hard to trace back from there. Fixed by branching
+on `undefined` explicitly rather than on nullish-ness, so an explicit null
+survives replay intact.
+
+The verification approach is worth noting too: the client's own modules were
+run under Node with only the database driver swapped (expo-sqlite replaced by
+node:sqlite behind drizzle's sqlite-proxy), so the sync logic under test was
+the real shipped code rather than a reimplementation. That is what surfaced
+the bug — the earlier replica harnesses had reimplemented the stamping and
+therefore could not reproduce it.

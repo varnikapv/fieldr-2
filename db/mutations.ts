@@ -123,8 +123,15 @@ export async function applyMutation(
   options: { synced: boolean; serverSeq?: number } = { synced: false },
 ): Promise<void> {
   // Locally-authored operations are stamped with this device. Operations
-  // replayed from the server keep whichever device actually authored them.
-  const deviceId = record.deviceId ?? (await getDeviceId());
+  // replayed from the server keep whichever device actually authored them —
+  // INCLUDING null, which means "authored before device identity existed".
+  //
+  // `??` would be wrong here: it cannot distinguish "no author field" (local,
+  // stamp me) from "author is explicitly null" (remote, historical). Using it
+  // made every device claim authorship of every pre-phase-5 operation it
+  // replayed, which would eventually name the wrong device in a rejection.
+  const deviceId =
+    record.deviceId === undefined ? await getDeviceId() : record.deviceId;
 
   await db.insert(mutations).values({
     opId: record.opId,
