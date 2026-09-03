@@ -88,6 +88,15 @@ async function writeCursor(value: number): Promise<void> {
     });
 }
 
+/** How many operations are waiting to be pushed. */
+export async function pendingCount(): Promise<number> {
+  const rows = await db
+    .select({ seq: mutations.seq })
+    .from(mutations)
+    .where(eq(mutations.synced, false));
+  return rows.length;
+}
+
 export async function syncNow(): Promise<SyncResult> {
   // ---- PUSH: unsynced operations, oldest first ----------------------------
   // Order matters: an insert must reach the server before the update that
