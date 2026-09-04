@@ -59,14 +59,7 @@ export function useAutoSync() {
       const previous = wasConnected.current;
       wasConnected.current = isConnected;
 
-      const willSync = shouldAutoSync(previous, isConnected, inFlight.current);
-      console.log(
-        `[auto-sync] event: type=${state.type} isConnected=${state.isConnected} ` +
-          `reachable=${state.isInternetReachable} | previous=${previous} ` +
-          `inFlight=${inFlight.current} -> ${willSync ? 'SYNCING' : 'ignored'}`,
-      );
-
-      if (!willSync) return;
+      if (!shouldAutoSync(previous, isConnected, inFlight.current)) return;
       run('netinfo');
     });
 
@@ -93,21 +86,14 @@ export function useAutoSync() {
 
       void (async () => {
         const queued = await pendingCount();
-        if (queued === 0) {
-          console.log('[auto-sync/foreground] nothing queued — skipping');
-          return;
-        }
+        if (queued === 0) return;
 
         // Ask for connectivity directly rather than trusting the ref, which
         // may be stale or still null after a backgrounded reconnect.
         const state = await NetInfo.fetch();
-        if (state.isConnected !== true) {
-          console.log('[auto-sync/foreground] queued work but offline — skipping');
-          return;
-        }
+        if (state.isConnected !== true) return;
         if (inFlight.current) return;
 
-        console.log(`[auto-sync/foreground] ${queued} queued, connected — syncing`);
         run('foreground');
       })();
     });
