@@ -15,6 +15,7 @@ import {
 import { db } from '../db/client';
 import { createVisit, updateVisit } from '../db/mutations';
 import { visits, type Visit } from '../db/schema';
+import { usePendingIds } from '../hooks/useSyncBadges';
 import { styles } from './styles';
 
 export function VisitsScreen() {
@@ -27,6 +28,9 @@ export function VisitsScreen() {
   const { data: rows } = useLiveQuery(
     db.select().from(visits).orderBy(desc(visits.createdAt)),
   );
+
+  // Visits are never validated, so they can be pending but never rejected.
+  const pendingIds = usePendingIds('visits');
 
   const canSubmit = patientName.trim().length > 0;
 
@@ -92,7 +96,11 @@ export function VisitsScreen() {
           <Text style={styles.muted}>No visits yet. Add one above.</Text>
         }
         renderItem={({ item }) => (
-          <VisitRow visit={item} onPress={() => setEditing(item)} />
+          <VisitRow
+            visit={item}
+            pending={pendingIds.has(item.id)}
+            onPress={() => setEditing(item)}
+          />
         )}
         keyboardShouldPersistTaps="handled"
       />
@@ -102,12 +110,23 @@ export function VisitsScreen() {
   );
 }
 
-function VisitRow({ visit, onPress }: { visit: Visit; onPress: () => void }) {
+function VisitRow({
+  visit,
+  pending,
+  onPress,
+}: {
+  visit: Visit;
+  pending: boolean;
+  onPress: () => void;
+}) {
   const edited = visit.updatedAt.getTime() !== visit.createdAt.getTime();
 
   return (
     <Pressable style={styles.row} onPress={onPress}>
-      <Text style={styles.rowName}>{visit.patientName}</Text>
+      <View style={styles.badgeRow}>
+        <Text style={styles.rowName}>{visit.patientName}</Text>
+        {pending && <Text style={styles.badgePending}>◷</Text>}
+      </View>
       {visit.notes.length > 0 && <Text style={styles.rowNotes}>{visit.notes}</Text>}
       <Text style={styles.rowMeta}>
         {visit.id.slice(0, 8)} · updated {visit.updatedAt.toLocaleTimeString()}

@@ -6,6 +6,7 @@ import { FlatList, KeyboardAvoidingView, Platform, Pressable, Text, TextInput, V
 import { db } from '../db/client';
 import { createFollowUp, setFollowUpStatus } from '../db/mutations';
 import { followUps, type FollowUp } from '../db/schema';
+import { usePendingIds, useRejectedIds } from '../hooks/useSyncBadges';
 import { styles } from './styles';
 
 /**
@@ -22,6 +23,9 @@ export function FollowUpsScreen() {
   const { data: items } = useLiveQuery(
     db.select().from(followUps).orderBy(desc(followUps.createdAt)),
   );
+
+  const pendingIds = usePendingIds('follow_ups');
+  const rejectedIds = useRejectedIds('follow_ups');
 
   const canSubmit = title.trim().length > 0;
 
@@ -58,14 +62,38 @@ export function FollowUpsScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
         ListEmptyComponent={<Text style={styles.muted}>Nothing on the list.</Text>}
-        renderItem={({ item }) => <FollowUpRow item={item} />}
+        renderItem={({ item }) => (
+          <FollowUpRow
+            item={item}
+            pending={pendingIds.has(item.id)}
+            rejected={rejectedIds.has(item.id)}
+          />
+        )}
         keyboardShouldPersistTaps="handled"
       />
     </KeyboardAvoidingView>
   );
 }
 
-function FollowUpRow({ item }: { item: FollowUp }) {
+/**
+ * The badge bridges pending -> rejected rather than disappearing.
+ *
+ * When the server refuses an operation, three things happen at once on the
+ * losing device: the value reverts (replay excludes the rejected operation),
+ * the operation stops being pending, and the explanation appears on another
+ * tab. If the indicator simply vanished, that would read as a change quietly
+ * undoing itself — the exact feeling this project exists to eliminate. So the
+ * clock becomes a warning in place, and stays.
+ */
+function FollowUpRow({
+  item,
+  pending,
+  rejected,
+}: {
+  item: FollowUp;
+  pending: boolean;
+  rejected: boolean;
+}) {
   const done = item.status === 'done';
 
   return (
@@ -80,9 +108,15 @@ function FollowUpRow({ item }: { item: FollowUp }) {
         <Text style={[styles.followUpTitle, done && styles.followUpDone]}>
           {item.title}
         </Text>
-        <Text style={styles.rowMeta}>
-          {item.id.slice(0, 8)} · {item.status}
-        </Text>
+        <View style={styles.badgeRow}>
+          <Text style={styles.rowMeta}>
+            {item.id.slice(0, 8)} · {item.status}
+          </Text>
+          {pending && <Text style={styles.badgePending}>◷</Text>}
+          {!pending && rejected && (
+            <Text style={styles.badgeRejected}>⚠ not applied</Text>
+          )}
+        </View>
       </View>
     </Pressable>
   );

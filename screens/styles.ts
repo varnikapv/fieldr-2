@@ -61,6 +61,12 @@ export const styles = StyleSheet.create({
   followUpTitle: { fontSize: 16, flexShrink: 1 },
   followUpDone: { textDecorationLine: 'line-through', color: '#a1a1aa' },
 
+  // sync badges — deliberately small and quiet. A pending write is normal,
+  // not an error state, so it must not make the app look broken.
+  badgeRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
+  badgePending: { fontSize: 12, color: '#a1a1aa' },
+  badgeRejected: { fontSize: 12, color: '#b45309' },
+
   // sync inspector
   statRow: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 4 },
   statLabel: { color: '#52525b', fontSize: 14 },

@@ -55,7 +55,7 @@ log, a described repro — not assumed. If it hasn't been observed yet, run the
 failing scenario first.
 
 ## Current phase
-`Phase: 5`
+`Phase: 5 (complete — 6+ optional, not started)`
 Update this yourself as phases complete.
 
 ## The full ladder (context for every phase, not just the current one)

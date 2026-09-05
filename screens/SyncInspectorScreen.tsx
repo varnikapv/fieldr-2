@@ -74,7 +74,7 @@ export function SyncInspectorScreen() {
 
           {error ? <Text style={styles.syncError}>Sync failed: {error}</Text> : null}
 
-          <Stat label="Queued (not yet pushed)" value={(pending ?? []).length} />
+          <Stat label="Pending (not yet synced)" value={(pending ?? []).length} />
           {last ? (
             <>
               <Stat label="Last sync" value={last.at.toLocaleTimeString()} />
