@@ -3,6 +3,7 @@ import * as Crypto from 'expo-crypto';
 
 import { db } from './client';
 import { getDeviceId } from './device';
+import { notifyLocalWrite } from './localWrites';
 import {
   followUps,
   mutations,
@@ -146,6 +147,12 @@ export async function applyMutation(
   });
 
   await project(record);
+
+  // Announce local writes only. Operations replayed from the server arrive
+  // here with `synced: true`, so they cannot trigger a sync — which is what
+  // structurally prevents a pull from firing syncs that pull more operations
+  // that fire more syncs. No suppression flag to remember to set.
+  if (!options.synced) notifyLocalWrite();
 }
 
 /**

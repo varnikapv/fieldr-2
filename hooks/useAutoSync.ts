@@ -2,11 +2,12 @@ import NetInfo from '@react-native-community/netinfo';
 import { useEffect, useRef } from 'react';
 import { AppState } from 'react-native';
 
+import { subscribeLocalWrites } from '../db/localWrites';
 import { pendingCount, syncNow } from '../db/sync';
 import { shouldAutoSync } from './shouldAutoSync';
 
 /**
- * Phase 5 step 2: sync automatically, on two triggers.
+ * Phase 5 steps 2 and 4: sync automatically, on three triggers.
  *
  * This hook changes only WHEN sync runs. Everything about what happens during
  * a sync — device identity, compare-and-set validation, rejection handling,
@@ -20,14 +21,32 @@ import { shouldAutoSync } from './shouldAutoSync';
  * yet. It also keeps db/sync.ts a plain function, which is what lets the sync
  * logic be exercised under Node without native modules.
  */
+/**
+ * Long enough to coalesce a burst of taps, short enough to still feel like the
+ * edit synced immediately.
+ */
+const LOCAL_WRITE_DEBOUNCE_MS = 500;
+
 export function useAutoSync() {
   /** Null until the first event: we have no idea what the state was before. */
   const wasConnected = useRef<boolean | null>(null);
-  /** Shared by both triggers, so they can never run concurrently. */
+  /** Shared by all triggers, so they can never run concurrently. */
   const inFlight = useRef(false);
+  /** A trigger arrived while a sync was running: run once more afterwards. */
+  const rerun = useRef(false);
+  const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     function run(trigger: string) {
+      // Re-arm rather than drop. Without this, an edit made while a sync is
+      // in flight would sit queued until the next reconnect, foreground or
+      // manual press — which is precisely the gap the local-write trigger
+      // exists to close, just moved somewhere less obvious.
+      if (inFlight.current) {
+        rerun.current = true;
+        return;
+      }
+
       inFlight.current = true;
       syncNow()
         .then((result) => {
@@ -46,6 +65,10 @@ export function useAutoSync() {
         })
         .finally(() => {
           inFlight.current = false;
+          if (rerun.current) {
+            rerun.current = false;
+            run('rerun');
+          }
         });
     }
 
@@ -98,9 +121,38 @@ export function useAutoSync() {
       })();
     });
 
+    // ---- Trigger 3: a local write, while already online --------------------
+    //
+    // An always-connected device would otherwise queue an edit silently until
+    // the next connectivity transition, foreground, or button press.
+    //
+    // Debounced: a burst of quick edits (ticking several follow-ups) becomes
+    // one sync instead of one request each. Debouncing costs nothing here
+    // because push sends the ENTIRE pending queue — a later sync fully
+    // subsumes the earlier ones it replaced, so nothing is delayed beyond the
+    // window itself.
+    const unsubscribeLocalWrites = subscribeLocalWrites(() => {
+      if (debounce.current) clearTimeout(debounce.current);
+
+      debounce.current = setTimeout(() => {
+        debounce.current = null;
+
+        void (async () => {
+          // Offline is the normal case for this app, and firing a doomed
+          // request on every offline edit would be noise, not resilience.
+          const state = await NetInfo.fetch();
+          if (state.isConnected !== true) return;
+
+          run('local-write');
+        })();
+      }, LOCAL_WRITE_DEBOUNCE_MS);
+    });
+
     return () => {
+      if (debounce.current) clearTimeout(debounce.current);
       unsubscribeNetInfo();
       appStateSubscription.remove();
+      unsubscribeLocalWrites();
     };
   }, []);
 }
